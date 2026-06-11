@@ -115,22 +115,76 @@ const searchDrivers = async (req, res, next) => {
       keyword, gpuModel, gpuBrand, osVersion, architecture, exactModel
     });
 
-    const sortOption = getSortOption(sortBy, sortOrder);
-    const skip = (page - 1) * limit;
+    const isExactModel = exactModel === true || exactModel === 'true' || exactModel === '1';
+    const matchType = gpuModel ? (isExactModel ? 'exact' : 'fuzzy') : null;
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+    const skip = (pageNum - 1) * limitNum;
 
+    if (sortBy === 'version') {
+      const allDrivers = await Driver.find(query)
+        .select('-downloadUrl -checksum -auditRemarks -createdBy -mergedFrom -parentDriver')
+        .lean()
+        .exec();
+
+      const enriched = allDrivers.map(d => {
+        let gpuModelMatchType = 'n/a';
+        if (gpuModel) {
+          const escaped = gpuModel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const exactRegex = new RegExp(`^${escaped}$`, 'i');
+          const fuzzyRegex = new RegExp(escaped, 'i');
+          if (exactRegex.test(d.gpuModel || '')) {
+            gpuModelMatchType = 'exact';
+          } else if (fuzzyRegex.test(d.gpuModel || '')) {
+            gpuModelMatchType = 'fuzzy';
+          }
+        }
+        return {
+          ...d,
+          versionCode: d.versionCode,
+          fileSizeFormatted: formatFileSize(d.fileSize),
+          gpuModelMatchType
+        };
+      });
+
+      const sorted = sortDriversByVersion(enriched, sortOrder);
+      const total = sorted.length;
+      const pagedItems = sorted.slice(skip, skip + limitNum);
+
+      return successResponse(res, {
+        items: pagedItems,
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          total,
+          totalPages: Math.ceil(total / limitNum),
+          hasNext: skip + limitNum < total,
+          hasPrev: pageNum > 1
+        },
+        filters: { keyword, gpuModel, gpuBrand, osVersion, architecture, exactModel: isExactModel },
+        matchType,
+        matchTypeDescription: matchType === 'exact'
+          ? '精确型号匹配：只返回 gpuModel 完全等于查询值的驱动'
+          : (matchType === 'fuzzy' ? '模糊型号匹配：返回 gpuModel 中包含查询关键词的驱动' : null),
+        sortInfo: {
+          by: 'version',
+          order: sortOrder,
+          note: '全量结果已按版本号+发布时间+_id稳定排序，包含未显式设置 versionCode 的历史数据'
+        }
+      });
+    }
+
+    const sortOption = getSortOption(sortBy, sortOrder);
     const [total, drivers] = await Promise.all([
       Driver.countDocuments(query),
       Driver.find(query)
         .select('-downloadUrl -checksum -auditRemarks -createdBy -mergedFrom -parentDriver')
         .sort(sortOption)
         .skip(skip)
-        .limit(parseInt(limit))
+        .limit(limitNum)
         .lean()
         .exec()
     ]);
-
-    const isExactModel = exactModel === true || exactModel === 'true' || exactModel === '1';
-    const matchType = gpuModel ? (isExactModel ? 'exact' : 'fuzzy') : null;
 
     const formattedDrivers = drivers.map(d => {
       let gpuModelMatchType = 'n/a';
@@ -152,31 +206,15 @@ const searchDrivers = async (req, res, next) => {
       };
     });
 
-    if (sortBy === 'version') {
-      const sorted = sortDriversByVersion(formattedDrivers, sortOrder);
-      return successResponse(res, {
-        items: sorted,
-        pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
-          total,
-          totalPages: Math.ceil(total / limit)
-        },
-        filters: { keyword, gpuModel, gpuBrand, osVersion, architecture, exactModel: isExactModel },
-        matchType,
-        matchTypeDescription: matchType === 'exact'
-          ? '精确型号匹配：只返回 gpuModel 完全等于查询值的驱动'
-          : (matchType === 'fuzzy' ? '模糊型号匹配：返回 gpuModel 中包含查询关键词的驱动' : null)
-      });
-    }
-
     return successResponse(res, {
       items: formattedDrivers,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: pageNum,
+        limit: limitNum,
         total,
-        totalPages: Math.ceil(total / limit)
+        totalPages: Math.ceil(total / limitNum),
+        hasNext: skip + limitNum < total,
+        hasPrev: pageNum > 1
       },
       filters: { keyword, gpuModel, gpuBrand, osVersion, architecture, exactModel: isExactModel },
       matchType,

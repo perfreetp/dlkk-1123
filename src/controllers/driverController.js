@@ -269,11 +269,15 @@ const redeemDownloadToken = async (req, res, next) => {
 
     sessionRecord = await DownloadSession.findOne({ token });
 
-    const failWithSession = async (failureReason, statusCode = 400) => {
+    const failWithSession = async (failureReason, statusCode = 400, { setBlacklist = false, blacklistType = 'none' } = {}) => {
       if (sessionRecord) {
         sessionRecord.status = 'failed';
         sessionRecord.failureReason = failureReason;
         sessionRecord.redeemedAt = new Date();
+        if (setBlacklist) {
+          sessionRecord.blacklistHit = true;
+          sessionRecord.blacklistType = blacklistType || 'none';
+        }
         await sessionRecord.save();
       }
       return errorResponse(res, failureReason, statusCode);
@@ -322,9 +326,10 @@ const redeemDownloadToken = async (req, res, next) => {
 
     const blacklistResult = await checkDriverBlacklist(driver);
     if (blacklistResult.isBlocked) {
-      sessionRecord.blacklistHit = true;
-      sessionRecord.blacklistType = blacklistResult.hitType;
-      await failWithSession(`文件已被列入黑名单：${blacklistResult.reason}`, 403);
+      await failWithSession(`文件已被列入黑名单[${blacklistResult.hitType}]：${blacklistResult.reason}`, 403, {
+        setBlacklist: true,
+        blacklistType: blacklistResult.hitType
+      });
       return;
     }
 
@@ -412,32 +417,103 @@ const getDownloadSessions = async (req, res, next) => {
   }
 };
 
+const STATUS_LABELS = {
+  generated: '令牌已生成',
+  redeemed: '兑换成功',
+  failed: '兑换失败',
+  expired: '令牌已过期'
+};
+
+const BLACKLIST_TYPE_LABELS = {
+  file_md5: 'MD5 命中黑名单',
+  file_sha256: 'SHA256 命中黑名单',
+  url: '下载链接命中黑名单',
+  none: '未命中黑名单'
+};
+
 const getDownloadSessionDetail = async (req, res, next) => {
   try {
     const { sessionId } = req.params;
     const session = await DownloadSession.findOne({ sessionId })
-      .populate('driverId', 'name version gpuModel gpuBrand status downloadUrl')
+      .populate('driverId', 'name version gpuModel gpuBrand status downloadUrl fileSize osSupport architecture releaseDate')
       .populate('userId', 'username nickname role')
       .lean()
       .exec();
     if (!session) {
       return errorResponse(res, '下载会话不存在', 404);
     }
+
     const relatedSessions = session.recommendationId
       ? await DownloadSession.find({ recommendationId: session.recommendationId })
           .sort({ createdAt: 1 })
-          .select('sessionId status source recommendationId generatedAt redeemedAt failureReason blacklistHit blacklistType driverId')
-          .populate('driverId', 'name version')
+          .populate('driverId', 'name version gpuModel gpuBrand fileSize')
           .lean()
           .exec()
       : [];
+
+    const recommendationChainSummary = session.recommendationId
+      ? (() => {
+          const summary = {
+            recommendationId: session.recommendationId,
+            totalSessions: relatedSessions.length,
+            statusCounts: { generated: 0, redeemed: 0, failed: 0, expired: 0 },
+            blacklistHitCount: 0,
+            failureReasons: [],
+            driverVersions: [],
+            sources: [],
+            timeframe: { firstAt: null, lastAt: null }
+          };
+          const reasonMap = new Map();
+          const driverMap = new Map();
+          const sourceSet = new Set();
+          relatedSessions.forEach(s => {
+            summary.statusCounts[s.status] = (summary.statusCounts[s.status] || 0) + 1;
+            if (s.blacklistHit) summary.blacklistHitCount += 1;
+            if (s.failureReason) {
+              reasonMap.set(s.failureReason, (reasonMap.get(s.failureReason) || 0) + 1);
+            }
+            if (s.driverId) {
+              const key = `${s.driverId._id || s.driverId}`;
+              if (!driverMap.has(key)) {
+                driverMap.set(key, {
+                  driverId: s.driverId._id || s.driverId,
+                  name: s.driverId.name || '',
+                  version: s.driverId.version || '',
+                  gpuModel: s.driverId.gpuModel || '',
+                  sessionCount: 0,
+                  redeemedCount: 0
+                });
+              }
+              const d = driverMap.get(key);
+              d.sessionCount += 1;
+              if (s.status === 'redeemed') d.redeemedCount += 1;
+            }
+            if (s.source) sourceSet.add(s.source);
+            const t = s.generatedAt || s.createdAt;
+            if (t) {
+              if (!summary.timeframe.firstAt || t < summary.timeframe.firstAt) summary.timeframe.firstAt = t;
+              if (!summary.timeframe.lastAt || t > summary.timeframe.lastAt) summary.timeframe.lastAt = t;
+            }
+          });
+          summary.failureReasons = Array.from(reasonMap.entries()).map(([reason, count]) => ({ reason, count }));
+          summary.driverVersions = Array.from(driverMap.values());
+          summary.sources = Array.from(sourceSet);
+          return summary;
+        })()
+      : null;
+
     const eventTimeline = [
       {
         event: 'generated',
         name: '令牌生成',
         time: session.generatedAt,
         status: session.status === 'generated' ? 'pending' : 'done',
-        info: { source: session.source, clientIp: session.clientIp }
+        info: {
+          source: session.source,
+          clientIp: session.clientIp,
+          userAgent: session.userAgent,
+          recommendationId: session.recommendationId || null
+        }
       }
     ];
     if (session.redeemedAt) {
@@ -445,17 +521,27 @@ const getDownloadSessionDetail = async (req, res, next) => {
         event: 'redeemed',
         name: '令牌兑换',
         time: session.redeemedAt,
-        status: session.status === 'redeemed' ? 'success' : (session.status === 'failed' ? 'failed' : 'pending'),
-        info: session.status === 'failed' ? { failureReason: session.failureReason } : {}
+        status: session.status === 'redeemed'
+          ? 'success'
+          : (session.status === 'failed' ? 'failed' : (session.status === 'expired' ? 'expired' : 'pending')),
+        info: {
+          failureReason: session.failureReason || null,
+          blacklistHit: !!session.blacklistHit,
+          blacklistType: session.blacklistType || 'none',
+          blacklistTypeLabel: BLACKLIST_TYPE_LABELS[session.blacklistType] || session.blacklistType
+        }
       });
-    }
-    if (session.status === 'failed' && !session.redeemedAt) {
+    } else if (session.status === 'failed') {
       eventTimeline.push({
         event: 'failed',
         name: '兑换失败',
-        time: session.redeemedAt || session.createdAt,
+        time: session.updatedAt || session.createdAt,
         status: 'failed',
-        info: { failureReason: session.failureReason }
+        info: {
+          failureReason: session.failureReason || null,
+          blacklistHit: !!session.blacklistHit,
+          blacklistType: session.blacklistType || 'none'
+        }
       });
     }
     if (session.status === 'expired') {
@@ -467,10 +553,40 @@ const getDownloadSessionDetail = async (req, res, next) => {
         info: {}
       });
     }
+
+    const sessionWithLabels = {
+      ...session,
+      statusLabel: STATUS_LABELS[session.status] || session.status,
+      blacklistTypeLabel: BLACKLIST_TYPE_LABELS[session.blacklistType] || session.blacklistType,
+      fileInfoWithLabels: session.fileInfo ? {
+        ...session.fileInfo,
+        fileSizeFormatted: session.fileInfo.fileSize ? formatFileSize(session.fileInfo.fileSize) : null
+      } : null
+    };
+
+    const relatedWithLabels = relatedSessions.map(s => ({
+      sessionId: s.sessionId,
+      status: s.status,
+      statusLabel: STATUS_LABELS[s.status] || s.status,
+      source: s.source,
+      recommendationId: s.recommendationId,
+      generatedAt: s.generatedAt,
+      redeemedAt: s.redeemedAt,
+      failureReason: s.failureReason,
+      blacklistHit: !!s.blacklistHit,
+      blacklistType: s.blacklistType,
+      blacklistTypeLabel: BLACKLIST_TYPE_LABELS[s.blacklistType] || s.blacklistType,
+      driverId: s.driverId?._id || s.driverId,
+      driverName: s.driverId?.name,
+      driverVersion: s.driverId?.version,
+      driverGpuModel: s.driverId?.gpuModel
+    }));
+
     return successResponse(res, {
-      session,
+      session: sessionWithLabels,
       eventTimeline,
-      relatedSessions
+      recommendationChainSummary,
+      relatedSessions: relatedWithLabels
     });
   } catch (error) {
     next(error);

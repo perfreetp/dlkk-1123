@@ -440,22 +440,33 @@ const generateRecommendationList = async (req, res, next) => {
       };
     });
 
-    const historyVersionsRaw = includeOldVersions ? [] : sortedDrivers.slice(limit, limit + 30);
-
-    const historyTimeline = historyVersionsRaw.map((d, idx) => {
+    const historyTimeline = sortedDrivers.map((d, idx) => {
       const ranking = buildRankingFactors(d, sortedDrivers);
+      const inRecommendations = primaryDrivers.slice(0, limit).some(p => String(p._id) === String(d._id));
       return {
         timelineIndex: idx + 1,
         id: d._id,
         name: d.name,
         version: d.version,
+        versionCode: d.versionCode,
         releaseDate: d.releaseDate,
         fileSizeFormatted: formatFileSize(d.fileSize),
         downloadCount: d.downloadCount,
         rating: d.rating,
         isRecommended: d.isRecommended,
         osSupport: d.osSupport,
+        architecture: d.architecture,
+        gpuModel: d.gpuModel,
+        inRecommendationList: inRecommendations,
+        recommendationRank: inRecommendations
+          ? (primaryDrivers.slice(0, limit).findIndex(p => String(p._id) === String(d._id)) + 1)
+          : null,
         topHitFactors: ranking.factors.filter(f => f.hit).map(f => f.name),
+        rankingFactorsSummary: {
+          totalScore: ranking.totalScore,
+          maxScore: ranking.maxScore,
+          hitFactorNames: ranking.factors.filter(f => f.hit).map(f => f.name)
+        },
         download: {
           tokenUrl: `/api/v1/drivers/${d._id}/download/token?source=customer_service&recommendationId=${recommendationId}`,
           tokenMethod: 'POST'
@@ -467,12 +478,13 @@ const generateRecommendationList = async (req, res, next) => {
     let currentYear = null;
     let currentGroup = null;
     historyTimeline.forEach(item => {
-      const year = new Date(item.releaseDate).getFullYear();
+      const year = item.releaseDate ? new Date(item.releaseDate).getFullYear() : '未知年份';
       if (year !== currentYear) {
         currentYear = year;
-        currentGroup = { year, items: [] };
+        currentGroup = { year, count: 0, items: [] };
         timelineGroups.push(currentGroup);
       }
+      currentGroup.count += 1;
       currentGroup.items.push(item);
     });
 

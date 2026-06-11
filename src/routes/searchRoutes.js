@@ -8,10 +8,11 @@ const {
   getGpuModels
 } = require('../controllers/searchController');
 
-router.get('/search', searchDrivers);
+router.get('/', searchDrivers);
 router.get('/hot', getHotDrivers);
 router.get('/brands', getGpuBrands);
 router.get('/os', getSupportedOS);
+router.get('/models', getGpuModels);
 router.get('/gpu-models', getGpuModels);
 
 module.exports = router;
