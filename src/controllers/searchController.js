@@ -26,6 +26,18 @@ const buildSearchQuery = async (queryParams, { includeUnpublished = false } = {}
     } else {
       query.gpuModel = new RegExp(gpuModel, 'i');
     }
+    if (keyword) {
+      const regex = new RegExp(keyword, 'i');
+      query.$and = (query.$and || []).concat([
+        {
+          $or: [
+            { name: regex },
+            { description: regex },
+            { tags: { $in: [regex] } }
+          ]
+        }
+      ]);
+    }
   } else if (keyword) {
     const regex = new RegExp(keyword, 'i');
     query.$or = [
@@ -73,11 +85,11 @@ const getSortOption = (sortBy, sortOrder) => {
   const order = sortOrder === 'asc' ? 1 : -1;
   switch (sortBy) {
     case 'version':
-      return { releaseDate: order, version: order, _id: 1 };
+      return { versionCode: order, releaseDate: order, _id: 1 };
     case 'downloads':
-      return { downloadCount: order, _id: 1 };
+      return { downloadCount: order, versionCode: -1, _id: 1 };
     case 'rating':
-      return { 'rating.average': order, _id: 1 };
+      return { 'rating.average': order, versionCode: -1, _id: 1 };
     case 'date':
     default:
       return { createdAt: order, _id: 1 };
@@ -121,14 +133,6 @@ const searchDrivers = async (req, res, next) => {
       ...d,
       fileSizeFormatted: formatFileSize(d.fileSize)
     }));
-
-    if (sortBy === 'version') {
-      formattedDrivers.sort((a, b) => {
-        const cmp = compareVersions(a.version, b.version);
-        if (cmp !== 0) return sortOrder === 'desc' ? -cmp : cmp;
-        return new Date(a.releaseDate) - new Date(b.releaseDate);
-      });
-    }
 
     return successResponse(res, {
       items: formattedDrivers,

@@ -4,6 +4,7 @@ const {
   submitFeedback,
   getMyFeedbacks,
   submitRating,
+  getMyRating,
   addFavorite,
   removeFavorite,
   getMyFavorites,

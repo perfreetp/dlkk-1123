@@ -40,8 +40,8 @@ const getDriverDetail = async (req, res, next) => {
     if (blacklistMap.url.length > 0) relatedDriversQuery.downloadUrl = { $nin: blacklistMap.url };
 
     const relatedDrivers = await Driver.find(relatedDriversQuery)
-      .select('name version releaseDate downloadCount rating isRecommended')
-      .sort({ releaseDate: -1 })
+      .select('name version versionCode releaseDate downloadCount rating isRecommended')
+      .sort({ versionCode: -1, releaseDate: -1, _id: 1 })
       .limit(5)
       .lean()
       .exec();
@@ -104,10 +104,14 @@ const getDriverVersions = async (req, res, next) => {
       query.osSupport = { $elemMatch: { $regex: new RegExp(osVersion, 'i') } };
     }
     if (architecture && architecture !== 'all') {
-      query.$or = [
-        { architecture: architecture },
-        { architecture: 'all' }
-      ];
+      query.$and = (query.$and || []).concat([
+        {
+          $or: [
+            { architecture: architecture },
+            { architecture: 'all' }
+          ]
+        }
+      ]);
     }
 
     const blacklistMap = await getBlacklistValuesMap(['file_md5', 'file_sha256', 'url']);
@@ -116,8 +120,8 @@ const getDriverVersions = async (req, res, next) => {
     if (blacklistMap.url.length > 0) query.downloadUrl = { $nin: blacklistMap.url };
 
     const drivers = await Driver.find(query)
-      .select('name version gpuModel gpuBrand osSupport architecture releaseDate downloadCount rating isRecommended')
-      .sort({ releaseDate: -1 })
+      .select('name version versionCode gpuModel gpuBrand osSupport architecture releaseDate downloadCount rating isRecommended')
+      .sort({ versionCode: -1, releaseDate: -1, _id: 1 })
       .lean()
       .exec();
     return successResponse(res, drivers);

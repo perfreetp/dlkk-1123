@@ -137,4 +137,25 @@ driverSchema.index({ name: 'text', gpuModel: 'text', description: 'text', tags: 
 driverSchema.index({ gpuBrand: 1, status: 1 });
 driverSchema.index({ status: 1, osSupport: 1 });
 
+const generateVersionCode = (version) => {
+  if (!version) return '000000';
+  const parts = version.split(/[.\-+_]/);
+  const padded = parts.map(p => {
+    const num = parseInt(p, 10);
+    if (isNaN(num)) return '000000';
+    return num.toString().padStart(6, '0');
+  });
+  while (padded.length < 4) padded.push('000000');
+  return padded.slice(0, 4).join('.');
+};
+
+driverSchema.pre('save', function (next) {
+  if (this.isModified('version') || !this.versionCode) {
+    this.versionCode = generateVersionCode(this.version);
+  }
+  next();
+});
+
+driverSchema.statics.generateVersionCode = generateVersionCode;
+
 module.exports = mongoose.model('Driver', driverSchema);

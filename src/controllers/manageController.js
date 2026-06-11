@@ -255,7 +255,7 @@ const generateRecommendationList = async (req, res, next) => {
       };
     }
 
-    const blacklistMap = await getBlacklistValuesMap(['file_md5', 'file_sha256', 'url');
+    const blacklistMap = await getBlacklistValuesMap(['file_md5', 'file_sha256', 'url']);
     const blacklistConditions = [];
     if (blacklistMap.file_md5.length > 0) {
       blacklistConditions.push({ 'checksum.md5': { $nin: blacklistMap.file_md5 } });
@@ -271,9 +271,10 @@ const generateRecommendationList = async (req, res, next) => {
     }
 
     const drivers = await Driver.find(query)
-      .select('name gpuModel gpuBrand version releaseDate osSupport architecture fileSize description rating downloadCount isRecommended releaseNotes checksum')
+      .select('name gpuModel gpuBrand version versionCode releaseDate osSupport architecture fileSize description rating downloadCount isRecommended releaseNotes checksum')
       .sort([
         ['isRecommended', -1],
+        ['versionCode', -1],
         ['releaseDate', -1],
         ['rating.average', -1],
         ['downloadCount', -1],
