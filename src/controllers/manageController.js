@@ -1,5 +1,5 @@
 const { Feedback, Blacklist, OperationLog, Subscription, Driver, Favorite } = require('../models');
-const { successResponse, errorResponse, paginate } = require('../utils/helpers');
+const { successResponse, errorResponse, paginate, formatFileSize, getBlacklistValuesMap } = require('../utils/helpers');
 const { logOperation } = require('../utils/logger');
 
 const getFeedbacks = async (req, res, next) => {
@@ -225,64 +225,201 @@ const cancelSubscription = async (req, res, next) => {
 
 const generateRecommendationList = async (req, res, next) => {
   try {
-    const { gpuModel, osVersion, architecture, limit = 10, includeOldVersions = false } = req.body;
+    const {
+      gpuModel,
+      osVersion,
+      architecture,
+      limit = 5,
+      includeOldVersions = false,
+      exactModel = false
+    } = req.body;
+
     if (!gpuModel) {
       return errorResponse(res, '请提供显卡型号', 400);
     }
+
     const query = { status: 'published' };
-    query.$or = [
-      { gpuModel: new RegExp(gpuModel, 'i') },
-      { name: new RegExp(gpuModel, 'i') }
-    ];
+
+    if (exactModel === true || exactModel === 'true') {
+      query.gpuModel = { $regex: new RegExp(`^${gpuModel}$`, 'i') };
+    } else {
+      query.$or = [
+        { gpuModel: new RegExp(gpuModel, 'i') },
+        { name: new RegExp(gpuModel, 'i') }
+      ];
+    }
+
     if (osVersion) {
       query.osSupport = {
         $elemMatch: { $regex: new RegExp(osVersion, 'i') }
       };
     }
+
+    const blacklistMap = await getBlacklistValuesMap(['file_md5', 'file_sha256', 'url');
+    const blacklistConditions = [];
+    if (blacklistMap.file_md5.length > 0) {
+      blacklistConditions.push({ 'checksum.md5': { $nin: blacklistMap.file_md5 } });
+    }
+    if (blacklistMap.file_sha256.length > 0) {
+      blacklistConditions.push({ 'checksum.sha256': { $nin: blacklistMap.file_sha256 } });
+    }
+    if (blacklistMap.url.length > 0) {
+      blacklistConditions.push({ downloadUrl: { $nin: blacklistMap.url } });
+    }
+    if (blacklistConditions.length > 0) {
+      query.$and = (query.$and || []).concat(blacklistConditions);
+    }
+
     const drivers = await Driver.find(query)
-      .select('name gpuModel gpuBrand version releaseDate osSupport architecture fileSize description rating downloadCount isRecommended releaseNotes checksum downloadUrl')
+      .select('name gpuModel gpuBrand version releaseDate osSupport architecture fileSize description rating downloadCount isRecommended releaseNotes checksum')
       .sort([
         ['isRecommended', -1],
         ['releaseDate', -1],
         ['rating.average', -1],
-        ['downloadCount', -1]
+        ['downloadCount', -1],
+        ['_id', 1]
       ])
       .lean()
       .exec();
-    const versions = new Map();
+
     const filteredDrivers = drivers.filter(d => {
       if (architecture && architecture !== 'all') {
         if (d.architecture !== 'all' && d.architecture !== architecture) {
           return false;
         }
       }
-      if (!includeOldVersions) {
-        const key = `${d.gpuModel}-${d.osSupport.join(',')}`;
-        if (versions.has(key)) return false;
-        versions.set(key, true);
-      }
       return true;
-    }).slice(0, limit);
-    const recommendationList = filteredDrivers.map((d, idx) => ({
-      rank: idx + 1,
-      driver: d,
-      recommendationLevel: idx === 0 ? '强烈推荐' : idx < 3 ? '推荐' : '可选',
-      reason: d.isRecommended ? '官方推荐版本' :
-        idx === 0 ? '最新稳定版本' :
-          d.rating.average >= 4.5 ? '用户评价优秀' :
-            d.downloadCount > 10000 ? '下载量领先' : '备选方案'
-    }));
+    });
+
+    let primaryDrivers = [];
+    if (!includeOldVersions) {
+      const seen = new Map();
+      filteredDrivers.forEach(d => {
+        const key = `${d.gpuModel.toLowerCase()}-${d.gpuBrand}`;
+        if (!seen.has(key)) {
+          seen.set(key, d);
+          primaryDrivers.push(d);
+        }
+      });
+    } else {
+      primaryDrivers = filteredDrivers;
+    }
+    primaryDrivers = primaryDrivers.slice(0, limit);
+
+    const buildRecommendationReason = (driver, index) => {
+      const reasons = [];
+      const tags = [];
+
+      if (driver.isRecommended) {
+        reasons.push('官方推荐版本，稳定性经过验证');
+        tags.push('官方推荐');
+      }
+      if (index === 0) {
+        reasons.push('当前最新版本，功能最完善');
+        tags.push('最新版本');
+      }
+      if (driver.rating?.average >= 4.5 && driver.rating?.count >= 5) {
+        reasons.push(`用户评分为 ${driver.rating.average} 分（${driver.rating.count} 人评价），口碑优秀`);
+        tags.push('口碑优秀');
+      }
+      if (driver.downloadCount > 100000) {
+        reasons.push(`下载量 ${(driver.downloadCount / 10000).toFixed(0)} 万次，用户基数大`);
+        tags.push('下载量大');
+      }
+      if (driver.downloadCount > 10000 && driver.downloadCount <= 100000) {
+        reasons.push(`下载量 ${(driver.downloadCount / 1000).toFixed(0)} 千次，广泛使用`);
+        tags.push('广泛使用');
+      }
+
+      if (reasons.length === 0) {
+        reasons.push('可用版本');
+      }
+
+      return {
+        reasons,
+        tags,
+        level: index === 0 ? '强烈推荐' : index < 3 ? '推荐' : '可选'
+      };
+    };
+
+    const recommendationList = primaryDrivers.map((d, idx) => {
+      const reasonInfo = buildRecommendationReason(d, idx);
+      return {
+        rank: idx + 1,
+        level: reasonInfo.level,
+        driver: {
+          id: d._id,
+          name: d.name,
+          gpuModel: d.gpuModel,
+          gpuBrand: d.gpuBrand,
+          version: d.version,
+          releaseDate: d.releaseDate,
+          osSupport: d.osSupport,
+          architecture: d.architecture,
+          fileSize: d.fileSize,
+          fileSizeFormatted: formatFileSize(d.fileSize),
+          rating: d.rating,
+          downloadCount: d.downloadCount,
+          isRecommended: d.isRecommended,
+          releaseNotes: d.releaseNotes || [],
+          checksum: {
+            md5: d.checksum?.md5 || '',
+            sha256: d.checksum?.sha256 || ''
+          }
+        },
+        reasons: reasonInfo.reasons,
+        tags: reasonInfo.tags,
+        download: {
+          tokenUrl: `/api/v1/drivers/${d._id}/download/token?source=customer_service`,
+          tokenMethod: 'POST',
+          hint: '调用生成下载令牌后即可获得真实下载地址'
+        }
+      };
+    });
+
+    const historyVersions = includeOldVersions ? [] : filteredDrivers
+      .slice(limit, limit + 10)
+      .map(d => ({
+        id: d._id,
+        name: d.name,
+        version: d.version,
+        releaseDate: d.releaseDate,
+        fileSizeFormatted: formatFileSize(d.fileSize),
+        downloadCount: d.downloadCount,
+        rating: d.rating,
+        isRecommended: d.isRecommended
+      }));
+
     logOperation({
       user: req.user,
       action: 'generate_recommendation',
       details: { gpuModel, osVersion, architecture, count: recommendationList.length },
       req
     });
-    return successResponse(res, {
-      query: { gpuModel, osVersion, architecture },
+
+    const summary = {
+      gpuModel,
+      osVersion: osVersion || '全部系统',
+      architecture: architecture || '全部架构',
       totalFound: drivers.length,
-      recommended: recommendationList.length,
-      recommendations: recommendationList
+      recommendedCount: recommendationList.length,
+      generatedAt: new Date().toISOString(),
+      generatedBy: req.user?.nickname || req.user?.username
+    };
+
+    const textSummary = `
+显卡型号：${gpuModel}
+系统版本：${osVersion || '全部系统'}
+推荐数量：${recommendationList.length} 个版本
+生成时间：${new Date().toLocaleString('zh-CN')}
+`.trim();
+
+    return successResponse(res, {
+      summary,
+      textSummary,
+      recommendations: recommendationList,
+      historyVersions,
+      totalFound: drivers.length
     });
   } catch (error) {
     next(error);

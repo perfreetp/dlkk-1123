@@ -1,5 +1,5 @@
-const { Driver, Feedback, Blacklist, OperationLog, Subscription } = require('../models');
-const { successResponse, errorResponse, paginate, checkBlacklist } = require('../utils/helpers');
+const { Driver, Feedback, Blacklist, OperationLog, Subscription, DownloadSession } = require('../models');
+const { successResponse, errorResponse, paginate, checkDriverBlacklist } = require('../utils/helpers');
 const { logOperation } = require('../utils/logger');
 
 const createDriver = async (req, res, next) => {
@@ -9,14 +9,15 @@ const createDriver = async (req, res, next) => {
       createdBy: req.user._id,
       status: 'pending'
     };
-    if (driverData.checksum?.md5 && await checkBlacklist('file_md5', driverData.checksum.md5)) {
-      return errorResponse(res, '文件MD5已被列入黑名单，禁止发布', 403);
+
+    const blacklistResult = await checkDriverBlacklist(driverData);
+    if (blacklistResult.isBlocked) {
+      return errorResponse(res, `提交失败，${blacklistResult.hitType === 'url' ? '下载链接' : '文件'}已被列入黑名单。原因：${blacklistResult.reason}`, 403);
     }
-    if (driverData.downloadUrl && await checkBlacklist('url', driverData.downloadUrl)) {
-      return errorResponse(res, '下载链接已被列入黑名单，禁止发布', 403);
-    }
+
     const driver = new Driver(driverData);
     await driver.save();
+
     logOperation({
       user: req.user,
       action: 'create_driver',
@@ -25,6 +26,7 @@ const createDriver = async (req, res, next) => {
       details: { name: driver.name, gpuModel: driver.gpuModel },
       req
     });
+
     return successResponse(res, driver, '驱动创建成功，等待审核', 201);
   } catch (error) {
     next(error);
@@ -38,15 +40,24 @@ const updateDriver = async (req, res, next) => {
     delete updateData.status;
     delete updateData.publishedBy;
     delete updateData.publishedAt;
+
     const driver = await Driver.findById(id);
     if (!driver) {
       return errorResponse(res, '驱动不存在', 404);
     }
+
+    const mergedData = { ...driver.toObject(), ...updateData };
+    const blacklistResult = await checkDriverBlacklist(mergedData);
+    if (blacklistResult.isBlocked) {
+      return errorResponse(res, `更新失败，${blacklistResult.hitType === 'url' ? '下载链接' : '文件'}已被列入黑名单。原因：${blacklistResult.reason}`, 403);
+    }
+
     if (driver.status === 'published') {
       driver.status = 'pending';
     }
     Object.assign(driver, updateData);
     await driver.save();
+
     logOperation({
       user: req.user,
       action: 'update_driver',
@@ -55,6 +66,7 @@ const updateDriver = async (req, res, next) => {
       details: updateData,
       req
     });
+
     return successResponse(res, driver, '驱动更新成功');
   } catch (error) {
     next(error);
@@ -90,9 +102,12 @@ const publishDriver = async (req, res, next) => {
     if (!driver) {
       return errorResponse(res, '驱动不存在', 404);
     }
-    if (driver.checksum?.md5 && await checkBlacklist('file_md5', driver.checksum.md5)) {
-      return errorResponse(res, '文件MD5已被列入黑名单，禁止发布', 403);
+
+    const blacklistResult = await checkDriverBlacklist(driver);
+    if (blacklistResult.isBlocked) {
+      return errorResponse(res, `发布失败，${blacklistResult.hitType === 'url' ? '下载链接' : '文件'}已被列入黑名单。原因：${blacklistResult.reason}`, 403);
     }
+
     driver.status = 'published';
     driver.publishedBy = req.user._id;
     driver.publishedAt = new Date();
@@ -103,6 +118,7 @@ const publishDriver = async (req, res, next) => {
       });
     }
     await driver.save();
+
     logOperation({
       user: req.user,
       action: 'publish_driver',
@@ -111,6 +127,7 @@ const publishDriver = async (req, res, next) => {
       details: { name: driver.name, remark },
       req
     });
+
     return successResponse(res, driver, '驱动发布成功');
   } catch (error) {
     next(error);
@@ -133,6 +150,7 @@ const offlineDriver = async (req, res, next) => {
       });
     }
     await driver.save();
+
     logOperation({
       user: req.user,
       action: 'offline_driver',
@@ -141,6 +159,7 @@ const offlineDriver = async (req, res, next) => {
       details: { remark },
       req
     });
+
     return successResponse(res, driver, '驱动已下架');
   } catch (error) {
     next(error);
@@ -164,6 +183,7 @@ const rejectDriver = async (req, res, next) => {
       auditor: req.user._id
     });
     await driver.save();
+
     logOperation({
       user: req.user,
       action: 'reject_driver',
@@ -172,6 +192,7 @@ const rejectDriver = async (req, res, next) => {
       details: { remark },
       req
     });
+
     return successResponse(res, driver, '驱动已拒绝');
   } catch (error) {
     next(error);
@@ -194,6 +215,7 @@ const addAuditRemark = async (req, res, next) => {
       auditor: req.user._id
     });
     await driver.save();
+
     logOperation({
       user: req.user,
       action: 'add_audit_remark',
@@ -202,6 +224,7 @@ const addAuditRemark = async (req, res, next) => {
       details: { content },
       req
     });
+
     return successResponse(res, { auditRemarks: driver.auditRemarks }, '备注添加成功');
   } catch (error) {
     next(error);
@@ -252,6 +275,55 @@ const getAllDrivers = async (req, res, next) => {
   }
 };
 
+const getDriverDetailAdmin = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const driver = await Driver.findById(id)
+      .populate('createdBy', 'username nickname')
+      .populate('publishedBy', 'username nickname')
+      .lean()
+      .exec();
+
+    if (!driver) {
+      return errorResponse(res, '驱动不存在', 404);
+    }
+
+    const recentFeedbacks = await Feedback.find({ driverId: id })
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .populate('userId', 'username nickname')
+      .populate('handler', 'username nickname')
+      .lean()
+      .exec();
+
+    const ratingCount = driver.rating?.count || 0;
+    const averageRating = driver.rating?.average || 0;
+    const invalidLinkCount = driver.invalidLinkCount || 0;
+
+    const blacklistResult = await checkDriverBlacklist(driver);
+
+    return successResponse(res, {
+      ...driver,
+      stats: {
+        ratingCount,
+        averageRating,
+        invalidLinkCount,
+        feedbackCount: driver.feedbackCount || 0,
+        downloadCount: driver.downloadCount || 0
+      },
+      isBlacklisted: blacklistResult.isBlocked,
+      blacklistInfo: blacklistResult.isBlocked ? {
+        hitType: blacklistResult.hitType,
+        hitValue: blacklistResult.hitValue,
+        reason: blacklistResult.reason
+      } : null,
+      recentFeedbacks
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const mergeDrivers = async (req, res, next) => {
   try {
     const { targetDriverId, sourceDriverIds, mergeStrategy = 'newest' } = req.body;
@@ -275,6 +347,7 @@ const mergeDrivers = async (req, res, next) => {
       auditor: req.user._id
     });
     await targetDriver.save();
+
     await Driver.updateMany(
       { _id: { $in: sourceDriverIds } },
       {
@@ -284,6 +357,7 @@ const mergeDrivers = async (req, res, next) => {
         }
       }
     );
+
     logOperation({
       user: req.user,
       action: 'merge_drivers',
@@ -292,6 +366,7 @@ const mergeDrivers = async (req, res, next) => {
       details: { sourceDriverIds, mergeStrategy },
       req
     });
+
     return successResponse(res, {
       targetDriver: targetDriver._id,
       mergedCount: sourceDrivers.length,
@@ -305,20 +380,91 @@ const mergeDrivers = async (req, res, next) => {
 const getDownloadStatistics = async (req, res, next) => {
   try {
     const { startDate, endDate, gpuBrand, groupBy = 'day' } = req.query;
-    const query = { status: 'published' };
-    if (gpuBrand) query.gpuBrand = gpuBrand;
-    const topDrivers = await Driver.find(query)
+
+    const query = {};
+    if (startDate || endDate) {
+      query.createdAt = {};
+      if (startDate) query.createdAt.$gte = new Date(startDate);
+      if (endDate) query.createdAt.$lte = new Date(endDate);
+    }
+
+    const sessionQuery = { status: 'redeemed' };
+    if (startDate || endDate) {
+      sessionQuery.redeemedAt = {};
+      if (startDate) sessionQuery.redeemedAt.$gte = new Date(startDate);
+      if (endDate) sessionQuery.redeemedAt.$lte = new Date(endDate);
+    }
+
+    const sourceStats = await DownloadSession.aggregate([
+      { $match: sessionQuery },
+      {
+        $group: {
+          _id: '$source',
+          count: { $sum: 1 },
+          uniqueDrivers: { $addToSet: '$driverId' }
+        }
+      },
+      { $sort: { count: -1 } }
+    ]);
+
+    const sourceStatsFormatted = sourceStats.map(s => ({
+      source: s._id,
+      downloadCount: s.count,
+      uniqueDriverCount: s.uniqueDrivers.length
+    }));
+
+    let trendData = [];
+    if (startDate && endDate) {
+      const dateFormat = groupBy === 'hour'
+        ? { $dateToString: { format: '%Y-%m-%d %H:00', date: '$redeemedAt' } }
+        : { $dateToString: { format: '%Y-%m-%d', date: '$redeemedAt' } };
+
+      trendData = await DownloadSession.aggregate([
+        { $match: sessionQuery },
+        {
+          $group: {
+            _id: dateFormat,
+            total: { $sum: 1 }
+          }
+        },
+        { $sort: { _id: 1 } }
+      ]);
+
+      trendData = trendData.map(t => ({ date: t._id, count: t.total }));
+    }
+
+    const statusStats = await DownloadSession.aggregate([
+      { $match: query },
+      {
+        $group: {
+          _id: '$status',
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const blacklistHitCount = await DownloadSession.countDocuments({
+      ...query,
+      blacklistHit: true
+    });
+
+    const driverQuery = { status: 'published' };
+    if (gpuBrand) driverQuery.gpuBrand = gpuBrand;
+
+    const topDrivers = await Driver.find(driverQuery)
       .select('name gpuModel gpuBrand version downloadCount rating')
       .sort({ downloadCount: -1 })
       .limit(20)
       .lean()
       .exec();
+
     const totalDownloads = await Driver.aggregate([
-      { $match: query },
+      { $match: driverQuery },
       { $group: { _id: null, total: { $sum: '$downloadCount' } } }
     ]);
+
     const brandStats = await Driver.aggregate([
-      { $match: query },
+      { $match: driverQuery },
       {
         $group: {
           _id: '$gpuBrand',
@@ -329,18 +475,31 @@ const getDownloadStatistics = async (req, res, next) => {
       },
       { $sort: { totalDownloads: -1 } }
     ]);
+
     const totalPending = await Driver.countDocuments({ status: 'pending' });
     const totalPublished = await Driver.countDocuments({ status: 'published' });
     const totalOffline = await Driver.countDocuments({ status: 'offline' });
+    const totalMerged = await Driver.countDocuments({ status: 'merged' });
+
+    const totalSessions = await DownloadSession.countDocuments(query);
+    const totalRedeemed = await DownloadSession.countDocuments(sessionQuery);
+
     return successResponse(res, {
       overview: {
         totalDownloads: totalDownloads[0]?.total || 0,
         totalPending,
         totalPublished,
-        totalOffline
+        totalOffline,
+        totalMerged,
+        totalSessions,
+        totalRedeemed,
+        blacklistHitCount
       },
       topDrivers,
-      brandStats
+      brandStats,
+      sourceStats: sourceStatsFormatted,
+      statusStats: statusStats.map(s => ({ status: s._id, count: s.count })),
+      trendData
     });
   } catch (error) {
     next(error);
@@ -357,6 +516,7 @@ module.exports = {
   addAuditRemark,
   getPendingDrivers,
   getAllDrivers,
+  getDriverDetailAdmin,
   mergeDrivers,
   getDownloadStatistics
 };

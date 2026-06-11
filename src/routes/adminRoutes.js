@@ -10,9 +10,11 @@ const {
   addAuditRemark,
   getPendingDrivers,
   getAllDrivers,
+  getDriverDetailAdmin,
   mergeDrivers,
   getDownloadStatistics
 } = require('../controllers/adminController');
+const { getDownloadSessions } = require('../controllers/driverController');
 const {
   getFeedbacks,
   handleFeedback,
@@ -38,9 +40,11 @@ router.post('/drivers/:id/reject', auth, requireEditor, rejectDriver);
 router.post('/drivers/:id/remark', auth, requireEditor, addAuditRemark);
 router.get('/drivers/pending', auth, requireEditor, getPendingDrivers);
 router.get('/drivers', auth, requireEditor, getAllDrivers);
+router.get('/drivers/:id', auth, requireEditor, getDriverDetailAdmin);
 router.post('/drivers/merge', auth, requireAdmin, mergeDrivers);
 
 router.get('/statistics/downloads', auth, requireEditor, getDownloadStatistics);
+router.get('/download-sessions', auth, requireEditor, getDownloadSessions);
 
 router.get('/feedbacks', auth, requireEditor, getFeedbacks);
 router.post('/feedbacks/:id/handle', auth, requireEditor, handleFeedback);

@@ -14,6 +14,7 @@ const { auth, optionalAuth } = require('../middleware/auth');
 router.post('/feedback', optionalAuth, submitFeedback);
 router.get('/feedback/my', auth, getMyFeedbacks);
 router.post('/rating', auth, submitRating);
+router.get('/rating/:driverId', auth, getMyRating);
 router.post('/favorites', auth, addFavorite);
 router.delete('/favorites/:driverId', auth, removeFavorite);
 router.get('/favorites', auth, getMyFavorites);

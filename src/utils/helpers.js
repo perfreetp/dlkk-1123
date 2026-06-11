@@ -89,6 +89,55 @@ const checkBlacklist = async (type, value) => {
   return !!item;
 };
 
+const checkDriverBlacklist = async (driver) => {
+  const result = {
+    isBlocked: false,
+    hitType: 'none',
+    hitValue: '',
+    reason: ''
+  };
+  if (driver.checksum?.md5) {
+    const md5Item = await Blacklist.findOne({ type: 'file_md5', value: driver.checksum.md5, isActive: true });
+    if (md5Item) {
+      result.isBlocked = true;
+      result.hitType = 'file_md5';
+      result.hitValue = driver.checksum.md5;
+      result.reason = md5Item.reason || '文件MD5在黑名单中';
+      return result;
+    }
+  }
+  if (driver.checksum?.sha256) {
+    const sha256Item = await Blacklist.findOne({ type: 'file_sha256', value: driver.checksum.sha256, isActive: true });
+    if (sha256Item) {
+      result.isBlocked = true;
+      result.hitType = 'file_sha256';
+      result.hitValue = driver.checksum.sha256;
+      result.reason = sha256Item.reason || '文件SHA256在黑名单中';
+      return result;
+    }
+  }
+  if (driver.downloadUrl) {
+    const urlItem = await Blacklist.findOne({ type: 'url', value: driver.downloadUrl, isActive: true });
+    if (urlItem) {
+      result.isBlocked = true;
+      result.hitType = 'url';
+      result.hitValue = driver.downloadUrl;
+      result.reason = urlItem.reason || '下载链接在黑名单中';
+      return result;
+    }
+  }
+  return result;
+};
+
+const getBlacklistValuesMap = async (types = ['file_md5', 'file_sha256', 'url']) => {
+  const items = await Blacklist.find({ type: { $in: types }, isActive: true }).select('type value').lean();
+  const map = { file_md5: [], file_sha256: [], url: [] };
+  items.forEach(item => {
+    if (map[item.type]) map[item.type].push(item.value);
+  });
+  return map;
+};
+
 module.exports = {
   generateDownloadToken,
   parseVersion,
@@ -97,5 +146,7 @@ module.exports = {
   successResponse,
   errorResponse,
   paginate,
-  checkBlacklist
+  checkBlacklist,
+  checkDriverBlacklist,
+  getBlacklistValuesMap
 };
