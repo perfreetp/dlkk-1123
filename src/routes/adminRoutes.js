@@ -12,9 +12,10 @@ const {
   getAllDrivers,
   getDriverDetailAdmin,
   mergeDrivers,
-  getDownloadStatistics
+  getDownloadStatistics,
+  migrateVersionCodes
 } = require('../controllers/adminController');
-const { getDownloadSessions } = require('../controllers/driverController');
+const { getDownloadSessions, getDownloadSessionDetail } = require('../controllers/driverController');
 const {
   getFeedbacks,
   handleFeedback,
@@ -45,6 +46,8 @@ router.post('/drivers/merge', auth, requireAdmin, mergeDrivers);
 
 router.get('/statistics/downloads', auth, requireEditor, getDownloadStatistics);
 router.get('/download-sessions', auth, requireEditor, getDownloadSessions);
+router.get('/download-sessions/:sessionId', auth, requireEditor, getDownloadSessionDetail);
+router.post('/migrate/version-codes', auth, requireAdmin, migrateVersionCodes);
 
 router.get('/feedbacks', auth, requireEditor, getFeedbacks);
 router.post('/feedbacks/:id/handle', auth, requireEditor, handleFeedback);

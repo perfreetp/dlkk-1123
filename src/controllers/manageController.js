@@ -272,14 +272,6 @@ const generateRecommendationList = async (req, res, next) => {
 
     const drivers = await Driver.find(query)
       .select('name gpuModel gpuBrand version versionCode releaseDate osSupport architecture fileSize description rating downloadCount isRecommended releaseNotes checksum')
-      .sort([
-        ['isRecommended', -1],
-        ['versionCode', -1],
-        ['releaseDate', -1],
-        ['rating.average', -1],
-        ['downloadCount', -1],
-        ['_id', 1]
-      ])
       .lean()
       .exec();
 
@@ -292,10 +284,110 @@ const generateRecommendationList = async (req, res, next) => {
       return true;
     });
 
+    const sortedDrivers = require('../utils/helpers').sortDriversByVersion(filteredDrivers, 'desc');
+
+    const normalize = (val, min, max) => {
+      if (max === min) return 1;
+      return Math.max(0, Math.min(1, (val - min) / (max - min)));
+    };
+
+    const downloads = sortedDrivers.map(d => d.downloadCount || 0);
+    const ratings = sortedDrivers.map(d => d.rating?.average || 0);
+    const minDL = Math.min(...downloads, 0);
+    const maxDL = Math.max(...downloads, 1);
+    const maxRating = Math.max(...ratings, 5);
+
+    const buildRankingFactors = (driver, allDrivers) => {
+      const factors = [];
+      let totalScore = 0;
+
+      const isNewest = allDrivers.length > 0 &&
+        String(allDrivers[0]._id) === String(driver._id);
+
+      factors.push({
+        key: 'officialRecommended',
+        name: '官方推荐',
+        hit: !!driver.isRecommended,
+        score: driver.isRecommended ? 30 : 0,
+        weight: 30,
+        description: driver.isRecommended ? '官方推荐版本，经过完整稳定性验证' : '非官方推荐版本'
+      });
+      totalScore += driver.isRecommended ? 30 : 0;
+
+      factors.push({
+        key: 'newestVersion',
+        name: '最新版本',
+        hit: isNewest,
+        score: isNewest ? 25 : 0,
+        weight: 25,
+        description: isNewest ? '当前筛选条件下的最新版本，功能最完善' : `${driver.version}，比最新版本旧`
+      });
+      totalScore += isNewest ? 25 : 0;
+
+      const ratingScore = Math.round(normalize(driver.rating?.average || 0, 0, maxRating || 5) * 20);
+      const ratingHit = (driver.rating?.average || 0) >= 4.0 && (driver.rating?.count || 0) >= 3;
+      factors.push({
+        key: 'highRating',
+        name: '用户评分高',
+        hit: ratingHit,
+        score: ratingScore,
+        weight: 20,
+        description: ratingHit
+          ? `用户评分 ${driver.rating.average} 分（${driver.rating.count} 人评价），口碑优秀`
+          : `用户评分 ${driver.rating?.average || 0} 分（${driver.rating?.count || 0} 人评价）`
+      });
+      totalScore += ratingScore;
+
+      const dlScore = Math.round(normalize(driver.downloadCount || 0, minDL, maxDL) * 15);
+      const dlHit = (driver.downloadCount || 0) >= 10000;
+      factors.push({
+        key: 'highDownload',
+        name: '下载量高',
+        hit: dlHit,
+        score: dlScore,
+        weight: 15,
+        description: dlHit
+          ? `下载量 ${driver.downloadCount} 次，用户基数大，验证充分`
+          : `下载量 ${driver.downloadCount || 0} 次`
+      });
+      totalScore += dlScore;
+
+      const osMatch = !osVersion || (driver.osSupport || []).some(os =>
+        os.toLowerCase().includes(String(osVersion).toLowerCase())
+      );
+      factors.push({
+        key: 'osMatched',
+        name: '系统匹配',
+        hit: osMatch,
+        score: osMatch ? 10 : 0,
+        weight: 10,
+        description: osMatch
+          ? `支持的系统：${(driver.osSupport || []).join('、')}，与查询的 ${osVersion || '全部系统'} 匹配`
+          : `仅支持：${(driver.osSupport || []).join('、')}`
+      });
+      totalScore += osMatch ? 10 : 0;
+
+      return {
+        totalScore,
+        maxScore: 100,
+        factors
+      };
+    };
+
+    const buildRecommendationReason = (ranking) => {
+      const reasons = ranking.factors
+        .filter(f => f.hit)
+        .map(f => f.description);
+      const tags = ranking.factors
+        .filter(f => f.hit)
+        .map(f => f.name);
+      return { reasons, tags };
+    };
+
     let primaryDrivers = [];
     if (!includeOldVersions) {
       const seen = new Map();
-      filteredDrivers.forEach(d => {
+      sortedDrivers.forEach(d => {
         const key = `${d.gpuModel.toLowerCase()}-${d.gpuBrand}`;
         if (!seen.has(key)) {
           seen.set(key, d);
@@ -303,51 +395,18 @@ const generateRecommendationList = async (req, res, next) => {
         }
       });
     } else {
-      primaryDrivers = filteredDrivers;
+      primaryDrivers = sortedDrivers;
     }
     primaryDrivers = primaryDrivers.slice(0, limit);
 
-    const buildRecommendationReason = (driver, index) => {
-      const reasons = [];
-      const tags = [];
-
-      if (driver.isRecommended) {
-        reasons.push('官方推荐版本，稳定性经过验证');
-        tags.push('官方推荐');
-      }
-      if (index === 0) {
-        reasons.push('当前最新版本，功能最完善');
-        tags.push('最新版本');
-      }
-      if (driver.rating?.average >= 4.5 && driver.rating?.count >= 5) {
-        reasons.push(`用户评分为 ${driver.rating.average} 分（${driver.rating.count} 人评价），口碑优秀`);
-        tags.push('口碑优秀');
-      }
-      if (driver.downloadCount > 100000) {
-        reasons.push(`下载量 ${(driver.downloadCount / 10000).toFixed(0)} 万次，用户基数大`);
-        tags.push('下载量大');
-      }
-      if (driver.downloadCount > 10000 && driver.downloadCount <= 100000) {
-        reasons.push(`下载量 ${(driver.downloadCount / 1000).toFixed(0)} 千次，广泛使用`);
-        tags.push('广泛使用');
-      }
-
-      if (reasons.length === 0) {
-        reasons.push('可用版本');
-      }
-
-      return {
-        reasons,
-        tags,
-        level: index === 0 ? '强烈推荐' : index < 3 ? '推荐' : '可选'
-      };
-    };
+    const recommendationId = `rec_${Date.now()}_${require('crypto').randomBytes(4).toString('hex')}`;
 
     const recommendationList = primaryDrivers.map((d, idx) => {
-      const reasonInfo = buildRecommendationReason(d, idx);
+      const ranking = buildRankingFactors(d, sortedDrivers);
+      const reasonInfo = buildRecommendationReason(ranking);
       return {
         rank: idx + 1,
-        level: reasonInfo.level,
+        level: idx === 0 ? '强烈推荐' : idx < 3 ? '推荐' : '可选',
         driver: {
           id: d._id,
           name: d.name,
@@ -370,17 +429,23 @@ const generateRecommendationList = async (req, res, next) => {
         },
         reasons: reasonInfo.reasons,
         tags: reasonInfo.tags,
+        rankingFactors: ranking,
         download: {
-          tokenUrl: `/api/v1/drivers/${d._id}/download/token?source=customer_service`,
+          tokenUrl: `/api/v1/drivers/${d._id}/download/token?source=customer_service&recommendationId=${recommendationId}`,
           tokenMethod: 'POST',
-          hint: '调用生成下载令牌后即可获得真实下载地址'
+          hint: '调用生成下载令牌后即可获得真实下载地址',
+          recommendationId,
+          driverId: d._id
         }
       };
     });
 
-    const historyVersions = includeOldVersions ? [] : filteredDrivers
-      .slice(limit, limit + 10)
-      .map(d => ({
+    const historyVersionsRaw = includeOldVersions ? [] : sortedDrivers.slice(limit, limit + 30);
+
+    const historyTimeline = historyVersionsRaw.map((d, idx) => {
+      const ranking = buildRankingFactors(d, sortedDrivers);
+      return {
+        timelineIndex: idx + 1,
         id: d._id,
         name: d.name,
         version: d.version,
@@ -388,39 +453,89 @@ const generateRecommendationList = async (req, res, next) => {
         fileSizeFormatted: formatFileSize(d.fileSize),
         downloadCount: d.downloadCount,
         rating: d.rating,
-        isRecommended: d.isRecommended
-      }));
+        isRecommended: d.isRecommended,
+        osSupport: d.osSupport,
+        topHitFactors: ranking.factors.filter(f => f.hit).map(f => f.name),
+        download: {
+          tokenUrl: `/api/v1/drivers/${d._id}/download/token?source=customer_service&recommendationId=${recommendationId}`,
+          tokenMethod: 'POST'
+        }
+      };
+    });
+
+    const timelineGroups = [];
+    let currentYear = null;
+    let currentGroup = null;
+    historyTimeline.forEach(item => {
+      const year = new Date(item.releaseDate).getFullYear();
+      if (year !== currentYear) {
+        currentYear = year;
+        currentGroup = { year, items: [] };
+        timelineGroups.push(currentGroup);
+      }
+      currentGroup.items.push(item);
+    });
 
     logOperation({
       user: req.user,
       action: 'generate_recommendation',
-      details: { gpuModel, osVersion, architecture, count: recommendationList.length },
+      details: {
+        recommendationId,
+        gpuModel,
+        osVersion,
+        architecture,
+        count: recommendationList.length,
+        historyCount: historyTimeline.length
+      },
       req
     });
 
     const summary = {
+      recommendationId,
       gpuModel,
+      exactModel: !!exactModel,
       osVersion: osVersion || '全部系统',
       architecture: architecture || '全部架构',
-      totalFound: drivers.length,
+      totalFound: sortedDrivers.length,
       recommendedCount: recommendationList.length,
+      historyVersionCount: historyTimeline.length,
       generatedAt: new Date().toISOString(),
       generatedBy: req.user?.nickname || req.user?.username
     };
 
-    const textSummary = `
-显卡型号：${gpuModel}
-系统版本：${osVersion || '全部系统'}
-推荐数量：${recommendationList.length} 个版本
-生成时间：${new Date().toLocaleString('zh-CN')}
-`.trim();
+    const textSummaryLines = [
+      `【显卡驱动推荐清单 #${recommendationId.slice(-8)}】`,
+      `显卡型号：${gpuModel}${exactModel ? '（精确匹配）' : ''}`,
+      `系统版本：${osVersion || '全部系统'}`,
+      `筛选结果：共 ${sortedDrivers.length} 个可用版本，重点推荐 ${recommendationList.length} 个`,
+      `生成时间：${new Date().toLocaleString('zh-CN')}`,
+      '',
+      '【推荐版本】'
+    ];
+    recommendationList.forEach(r => {
+      textSummaryLines.push(`${r.rank}. ${r.driver.name} v${r.driver.version}`);
+      textSummaryLines.push(`   标签：${r.tags.join(' / ')}`);
+      textSummaryLines.push(`   理由：${r.reasons.slice(0, 2).join('；')}`);
+      textSummaryLines.push(`   令牌入口：POST ${r.download.tokenUrl}`);
+      textSummaryLines.push('');
+    });
+    if (historyTimeline.length > 0) {
+      textSummaryLines.push(`【历史版本（${historyTimeline.length} 个）】`);
+      historyTimeline.slice(0, 5).forEach(h => {
+        textSummaryLines.push(`- v${h.version}（${new Date(h.releaseDate).toLocaleDateString('zh-CN')}）${h.isRecommended ? ' [官方推荐]' : ''}`);
+      });
+      if (historyTimeline.length > 5) {
+        textSummaryLines.push(`... 还有 ${historyTimeline.length - 5} 个历史版本，详见 historyTimeline`);
+      }
+    }
 
     return successResponse(res, {
       summary,
-      textSummary,
+      textSummary: textSummaryLines.join('\n'),
       recommendations: recommendationList,
-      historyVersions,
-      totalFound: drivers.length
+      historyTimeline,
+      timelineGroups,
+      totalFound: sortedDrivers.length
     });
   } catch (error) {
     next(error);

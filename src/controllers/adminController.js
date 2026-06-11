@@ -1,5 +1,5 @@
 const { Driver, Feedback, Blacklist, OperationLog, Subscription, DownloadSession } = require('../models');
-const { successResponse, errorResponse, paginate, checkDriverBlacklist } = require('../utils/helpers');
+const { successResponse, errorResponse, paginate, checkDriverBlacklist, generateVersionCode } = require('../utils/helpers');
 const { logOperation } = require('../utils/logger');
 
 const createDriver = async (req, res, next) => {
@@ -506,6 +506,62 @@ const getDownloadStatistics = async (req, res, next) => {
   }
 };
 
+const migrateVersionCodes = async (req, res, next) => {
+  try {
+    const { dryRun = true } = req.query;
+    const isDryRun = dryRun !== 'false' && dryRun !== false;
+
+    const allDrivers = await Driver.find({}).select('_id version versionCode').lean();
+    const needUpdate = [];
+
+    for (const d of allDrivers) {
+      const expected = generateVersionCode(d.version);
+      if (!d.versionCode || d.versionCode !== expected) {
+        needUpdate.push({
+          _id: d._id,
+          version: d.version,
+          oldVersionCode: d.versionCode || null,
+          newVersionCode: expected
+        });
+      }
+    }
+
+    let updatedCount = 0;
+    if (!isDryRun && needUpdate.length > 0) {
+      const bulkOps = needUpdate.map(item => ({
+        updateOne: {
+          filter: { _id: item._id },
+          update: { $set: { versionCode: item.newVersionCode } }
+        }
+      }));
+      const result = await Driver.bulkWrite(bulkOps);
+      updatedCount = result.modifiedCount || 0;
+    }
+
+    logOperation({
+      user: req.user,
+      action: 'migrate_version_codes',
+      details: {
+        dryRun: isDryRun,
+        total: allDrivers.length,
+        needUpdate: needUpdate.length,
+        updatedCount
+      },
+      req
+    });
+
+    return successResponse(res, {
+      totalDrivers: allDrivers.length,
+      needUpdateCount: needUpdate.length,
+      dryRun: isDryRun,
+      updatedCount,
+      sampleUpdates: needUpdate.slice(0, 20)
+    }, isDryRun ? '预检完成，未实际修改数据（传 dryRun=false 执行迁移）' : `迁移完成，已更新 ${updatedCount} 条数据`);
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createDriver,
   updateDriver,
@@ -518,5 +574,6 @@ module.exports = {
   getAllDrivers,
   getDriverDetailAdmin,
   mergeDrivers,
-  getDownloadStatistics
+  getDownloadStatistics,
+  migrateVersionCodes
 };

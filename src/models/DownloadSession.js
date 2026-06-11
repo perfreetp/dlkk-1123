@@ -55,6 +55,10 @@ const downloadSessionSchema = new mongoose.Schema({
     sha256: String,
     version: String
   },
+  recommendationId: {
+    type: String,
+    index: true
+  },
   generatedAt: {
     type: Date,
     default: Date.now
@@ -68,5 +72,6 @@ const downloadSessionSchema = new mongoose.Schema({
 downloadSessionSchema.index({ createdAt: -1 });
 downloadSessionSchema.index({ source: 1, status: 1, createdAt: -1 });
 downloadSessionSchema.index({ driverId: 1, status: 1 });
+downloadSessionSchema.index({ recommendationId: 1 });
 
 module.exports = mongoose.model('DownloadSession', downloadSessionSchema);

@@ -133,7 +133,7 @@ const getDriverVersions = async (req, res, next) => {
 const generateDownloadLink = async (req, res, next) => {
   try {
     const { driverId } = req.params;
-    const { source = 'api' } = req.query;
+    const { source = 'api', recommendationId } = req.query;
 
     const driver = await Driver.findById(driverId);
     if (!driver) {
@@ -159,6 +159,7 @@ const generateDownloadLink = async (req, res, next) => {
         blacklistType,
         clientIp: req.ip,
         userAgent: req.headers['user-agent'],
+        recommendationId: recommendationId || null,
         fileInfo: {
           fileName: driver.name,
           fileSize: driver.fileSize,
@@ -183,7 +184,7 @@ const generateDownloadLink = async (req, res, next) => {
           action: 'generate_download_token_blocked',
           targetType: 'driver',
           targetId: driver._id,
-          details: { source, blacklistType: blacklistResult.hitType, reason: blacklistResult.reason },
+          details: { source, blacklistType: blacklistResult.hitType, reason: blacklistResult.reason, recommendationId },
           req
         });
       }
@@ -214,6 +215,7 @@ const generateDownloadLink = async (req, res, next) => {
       blacklistType: 'none',
       clientIp: req.ip,
       userAgent: req.headers['user-agent'],
+      recommendationId: recommendationId || null,
       fileInfo: {
         fileName: driver.name,
         fileSize: driver.fileSize,
@@ -231,7 +233,7 @@ const generateDownloadLink = async (req, res, next) => {
         action: 'generate_download_token',
         targetType: 'driver',
         targetId: driver._id,
-        details: { source, token, sessionId },
+        details: { source, token, sessionId, recommendationId },
         req
       });
     }
@@ -239,6 +241,7 @@ const generateDownloadLink = async (req, res, next) => {
     return successResponse(res, {
       token,
       sessionId,
+      recommendationId: recommendationId || null,
       expiresAt,
       expiresIn: config.downloadTokenExpiresIn / 1000,
       driverInfo: {
@@ -382,11 +385,13 @@ const incrementDownloadCount = async (req, res, next) => {
 
 const getDownloadSessions = async (req, res, next) => {
   try {
-    const { page = 1, limit = 20, source, status, startDate, endDate, driverId } = req.query;
+    const { page = 1, limit = 20, source, status, startDate, endDate, driverId, recommendationId, userId } = req.query;
     const query = {};
     if (source) query.source = source;
     if (status) query.status = status;
     if (driverId) query.driverId = driverId;
+    if (recommendationId) query.recommendationId = recommendationId;
+    if (userId) query.userId = userId;
     if (startDate || endDate) {
       query.createdAt = {};
       if (startDate) query.createdAt.$gte = new Date(startDate);
@@ -407,11 +412,77 @@ const getDownloadSessions = async (req, res, next) => {
   }
 };
 
+const getDownloadSessionDetail = async (req, res, next) => {
+  try {
+    const { sessionId } = req.params;
+    const session = await DownloadSession.findOne({ sessionId })
+      .populate('driverId', 'name version gpuModel gpuBrand status downloadUrl')
+      .populate('userId', 'username nickname role')
+      .lean()
+      .exec();
+    if (!session) {
+      return errorResponse(res, '下载会话不存在', 404);
+    }
+    const relatedSessions = session.recommendationId
+      ? await DownloadSession.find({ recommendationId: session.recommendationId })
+          .sort({ createdAt: 1 })
+          .select('sessionId status source recommendationId generatedAt redeemedAt failureReason blacklistHit blacklistType driverId')
+          .populate('driverId', 'name version')
+          .lean()
+          .exec()
+      : [];
+    const eventTimeline = [
+      {
+        event: 'generated',
+        name: '令牌生成',
+        time: session.generatedAt,
+        status: session.status === 'generated' ? 'pending' : 'done',
+        info: { source: session.source, clientIp: session.clientIp }
+      }
+    ];
+    if (session.redeemedAt) {
+      eventTimeline.push({
+        event: 'redeemed',
+        name: '令牌兑换',
+        time: session.redeemedAt,
+        status: session.status === 'redeemed' ? 'success' : (session.status === 'failed' ? 'failed' : 'pending'),
+        info: session.status === 'failed' ? { failureReason: session.failureReason } : {}
+      });
+    }
+    if (session.status === 'failed' && !session.redeemedAt) {
+      eventTimeline.push({
+        event: 'failed',
+        name: '兑换失败',
+        time: session.redeemedAt || session.createdAt,
+        status: 'failed',
+        info: { failureReason: session.failureReason }
+      });
+    }
+    if (session.status === 'expired') {
+      eventTimeline.push({
+        event: 'expired',
+        name: '令牌过期',
+        time: session.expiresAt,
+        status: 'failed',
+        info: {}
+      });
+    }
+    return successResponse(res, {
+      session,
+      eventTimeline,
+      relatedSessions
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getDriverDetail,
   getDriverVersions,
   generateDownloadLink,
   redeemDownloadToken,
   incrementDownloadCount,
-  getDownloadSessions
+  getDownloadSessions,
+  getDownloadSessionDetail
 };

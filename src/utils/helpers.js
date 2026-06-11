@@ -29,6 +29,36 @@ const compareVersions = (v1, v2) => {
   return 0;
 };
 
+const generateVersionCode = (version) => {
+  if (!version) return '000000';
+  const parts = version.split(/[.\-+_]/);
+  const padded = parts.map(p => {
+    const num = parseInt(p, 10);
+    if (isNaN(num)) return '000000';
+    return num.toString().padStart(6, '0');
+  });
+  while (padded.length < 4) padded.push('000000');
+  return padded.slice(0, 4).join('.');
+};
+
+const sortDriversByVersion = (drivers, order = 'desc') => {
+  const copy = [...drivers];
+  copy.sort((a, b) => {
+    const vCodeA = a.versionCode || generateVersionCode(a.version);
+    const vCodeB = b.versionCode || generateVersionCode(b.version);
+    if (vCodeA !== vCodeB) {
+      return order === 'desc' ? vCodeB.localeCompare(vCodeA) : vCodeA.localeCompare(vCodeB);
+    }
+    const tA = new Date(a.releaseDate || 0).getTime();
+    const tB = new Date(b.releaseDate || 0).getTime();
+    if (tA !== tB) return order === 'desc' ? tB - tA : tA - tB;
+    const idA = a._id ? String(a._id) : '';
+    const idB = b._id ? String(b._id) : '';
+    return order === 'desc' ? idB.localeCompare(idA) : idA.localeCompare(idB);
+  });
+  return copy;
+};
+
 const formatFileSize = (bytes) => {
   if (bytes === 0) return '0 B';
   const k = 1024;
@@ -142,6 +172,8 @@ module.exports = {
   generateDownloadToken,
   parseVersion,
   compareVersions,
+  generateVersionCode,
+  sortDriversByVersion,
   formatFileSize,
   successResponse,
   errorResponse,

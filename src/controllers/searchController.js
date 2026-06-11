@@ -1,5 +1,5 @@
 const { Driver, Blacklist } = require('../models');
-const { successResponse, errorResponse, compareVersions, formatFileSize, getBlacklistValuesMap } = require('../utils/helpers');
+const { successResponse, errorResponse, formatFileSize, getBlacklistValuesMap, sortDriversByVersion } = require('../utils/helpers');
 
 const buildSearchQuery = async (queryParams, { includeUnpublished = false } = {}) => {
   const {
@@ -129,10 +129,46 @@ const searchDrivers = async (req, res, next) => {
         .exec()
     ]);
 
-    const formattedDrivers = drivers.map(d => ({
-      ...d,
-      fileSizeFormatted: formatFileSize(d.fileSize)
-    }));
+    const isExactModel = exactModel === true || exactModel === 'true' || exactModel === '1';
+    const matchType = gpuModel ? (isExactModel ? 'exact' : 'fuzzy') : null;
+
+    const formattedDrivers = drivers.map(d => {
+      let gpuModelMatchType = 'n/a';
+      if (gpuModel) {
+        const escaped = gpuModel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const exactRegex = new RegExp(`^${escaped}$`, 'i');
+        const fuzzyRegex = new RegExp(escaped, 'i');
+        if (exactRegex.test(d.gpuModel || '')) {
+          gpuModelMatchType = 'exact';
+        } else if (fuzzyRegex.test(d.gpuModel || '')) {
+          gpuModelMatchType = 'fuzzy';
+        }
+      }
+      return {
+        ...d,
+        versionCode: d.versionCode,
+        fileSizeFormatted: formatFileSize(d.fileSize),
+        gpuModelMatchType
+      };
+    });
+
+    if (sortBy === 'version') {
+      const sorted = sortDriversByVersion(formattedDrivers, sortOrder);
+      return successResponse(res, {
+        items: sorted,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total,
+          totalPages: Math.ceil(total / limit)
+        },
+        filters: { keyword, gpuModel, gpuBrand, osVersion, architecture, exactModel: isExactModel },
+        matchType,
+        matchTypeDescription: matchType === 'exact'
+          ? '精确型号匹配：只返回 gpuModel 完全等于查询值的驱动'
+          : (matchType === 'fuzzy' ? '模糊型号匹配：返回 gpuModel 中包含查询关键词的驱动' : null)
+      });
+    }
 
     return successResponse(res, {
       items: formattedDrivers,
@@ -142,7 +178,11 @@ const searchDrivers = async (req, res, next) => {
         total,
         totalPages: Math.ceil(total / limit)
       },
-      filters: { keyword, gpuModel, gpuBrand, osVersion, architecture, exactModel: !!exactModel }
+      filters: { keyword, gpuModel, gpuBrand, osVersion, architecture, exactModel: isExactModel },
+      matchType,
+      matchTypeDescription: matchType === 'exact'
+        ? '精确型号匹配：只返回 gpuModel 完全等于查询值的驱动'
+        : (matchType === 'fuzzy' ? '模糊型号匹配：返回 gpuModel 中包含查询关键词的驱动' : null)
     });
   } catch (error) {
     next(error);
